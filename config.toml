@@ -1,0 +1,8 @@
+# Cấu hình giao diện cho Streamlit: tông màu xanh da trời nhạt + trắng.
+# Muốn đổi màu thì sửa các mã màu (dạng #RRGGBB) bên dưới.
+[theme]
+primaryColor = "#4A90D9"               # Xanh da trời (màu nút bấm, điểm nhấn)
+backgroundColor = "#FFFFFF"            # Nền chính: trắng
+secondaryBackgroundColor = "#E8F1FB"   # Nền phụ (side menu, ô): xanh da trời rất nhạt
+textColor = "#1A1A1A"                  # Màu chữ: gần đen cho dễ đọc
+font = "sans serif"
