@@ -160,8 +160,8 @@ COLUMN_MAPPING = {
     },
     "ctrip_booking_list": {
         "Ctrip_booking_id": "Mã Xác Nhận Của Khách Sạn",
-        "Net_income": "Giá hợp đồng",
-        "Gross_income": "Gia bán",
+        "Net_income": "Giá phòng thu về",
+        "Gross_income": "Giá bán phòng",
     },
     # --- 3 bảng dưới đây dùng MAPPING THỦ CÔNG (xem MANUAL_MAPPING_TABLES) ---
     # Người dùng tự nhập tên cột trong file lúc import, nên ở đây để rỗng {}.
