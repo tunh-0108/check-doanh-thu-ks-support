@@ -12,6 +12,7 @@ import streamlit as st
 import pandas as pd
 
 import database  # đây là file database.py ở cùng thư mục
+import bulk_import  # import nhiều file raw một lúc
 import reconciliation  # logic đối chiếu chứng từ + tính doanh thu
 import export  # logic xuất file Excel
 
@@ -38,8 +39,97 @@ selected_feature = st.sidebar.radio(
 # ---------------------------------------------------------------------------
 # CHỨC NĂNG: IMPORT DATA
 # ---------------------------------------------------------------------------
+def show_bulk_import_section():
+    """Import nhiều file raw một lúc (xem bulk_import.py)."""
+    hotel_label = st.selectbox("Chọn cơ sở:", list(bulk_import.HOTELS))
+    skip_company = st.checkbox(
+        "Tạm bỏ qua sao kê tài khoản công ty",
+        value=True,
+        help="Tick: không import bảng company_bank_transactions (giữ nguyên dữ liệu cũ). "
+             "Bỏ tick: bắt buộc phải có file sao kê tài khoản công ty, nếu không sẽ báo lỗi.",
+    )
+    uploaded_files = st.file_uploader(
+        "Kéo thả tất cả file raw vào đây (csv, xlsx, xls):",
+        type=["csv", "xlsx", "xls"],
+        accept_multiple_files=True,
+    )
+    st.caption(
+        "Tool tự nhận diện từng file, bỏ phần tiêu đề/tổng/footer thừa và import vào đúng bảng. "
+        "Nếu có file sai format thì KHÔNG import gì cả (dữ liệu cũ giữ nguyên)."
+    )
+
+    # File thu chi tiền mặt mà tool chưa tự chọn được sheet -> cho người dùng chọn.
+    uploaded_names = {f.name for f in (uploaded_files or [])}
+    cash_sheets = {}
+    for request in st.session_state.get("bulk_sheet_requests", []):
+        if request["file"] not in uploaded_names:
+            continue
+        cash_sheets[request["file"]] = st.multiselect(
+            f"Chọn sheet tiền mặt cần import từ file '{request['file']}':",
+            request["sheets"],
+            key=f"bulk_sheets_{request['file']}",
+        )
+
+    if st.button("Import", disabled=not uploaded_files):
+        files = [(f.name, f.getvalue()) for f in uploaded_files]
+        with st.spinner("Đang xử lý và import..."):
+            result = bulk_import.run_bulk_import(
+                files,
+                hotel_label,
+                skip_company=skip_company,
+                cash_sheets={k: v for k, v in cash_sheets.items() if v},
+            )
+        st.session_state["bulk_result"] = result
+        old_files = [r["file"] for r in st.session_state.get("bulk_sheet_requests", [])]
+        st.session_state["bulk_sheet_requests"] = result.sheet_requests
+        if [r["file"] for r in result.sheet_requests] != old_files:
+            st.rerun()  # vẽ lại để hiện / ẩn ô chọn sheet phía trên nút Import
+
+    result = st.session_state.get("bulk_result")
+    if result is None:
+        return
+
+    st.subheader("Kết quả từng file")
+    st.dataframe(
+        pd.DataFrame(result.files).rename(columns={
+            "file": "File", "kind": "Loại file", "table": "Bảng",
+            "rows": "Số dòng", "status": "Trạng thái", "detail": "Ghi chú",
+        }),
+        width="stretch",
+    )
+
+    if result.errors:
+        st.error(
+            "Có lỗi format nên ĐÃ HỦY import, toàn bộ dữ liệu cũ được giữ nguyên. "
+            "Các lỗi cần sửa:"
+        )
+        for file_name, message in result.errors:
+            st.write(f"- **{file_name}**: {message}")
+    elif result.sheet_requests:
+        st.info(
+            "Chưa import gì. Hãy chọn sheet tiền mặt cần import ở phía trên "
+            "rồi bấm Import lại."
+        )
+    elif result.committed:
+        st.success(
+            "Import thành công: "
+            + ", ".join(f"{t} ({n} dòng)" for t, n in result.tables.items())
+        )
+    for warning in result.warnings:
+        st.warning(warning)
+
+
 def show_import_data_page():
     st.title("Import data")
+
+    mode = st.radio(
+        "Chế độ import:",
+        ["Import từng bảng", "Import nhiều file 1 lúc"],
+        horizontal=True,
+    )
+    if mode == "Import nhiều file 1 lúc":
+        show_bulk_import_section()
+        return
 
     # --- Bước 1: chọn bảng cần import ---
     table_names = list(database.TABLES.keys())

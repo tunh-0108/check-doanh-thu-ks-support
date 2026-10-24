@@ -263,30 +263,15 @@ def normalize_column_name(name):
     return text.strip()
 
 
-def import_dataframe(table_name, df, custom_mapping=None):
+def prepare_import(table_name, df, custom_mapping=None):
     """
-    Đưa dữ liệu từ một DataFrame (đọc từ file CSV/Excel) vào bảng tương ứng,
-    DỰA THEO MAPPING.
-
-    Mapping được chọn như sau:
-      - Nếu có truyền custom_mapping (mapping do NGƯỜI DÙNG tự nhập, dùng cho
-        các bảng trong MANUAL_MAPPING_TABLES) thì dùng nó.
-      - Nếu không, dùng mapping CỐ ĐỊNH đã khai báo trong COLUMN_MAPPING.
-
-    Cách hoạt động:
-      - Với mỗi cột DB trong mapping, tìm cột tương ứng trong file (theo tên
-        cột trong file). Nếu file có cột đó thì lấy dữ liệu và đổi tên thành
-        tên cột DB.
-      - GHI ĐÈ TOÀN BỘ: trước khi thêm dữ liệu mới, bảng sẽ bị xóa sạch dữ
-        liệu cũ. Sau khi import, bảng chỉ còn đúng dữ liệu vừa import.
-      - Lưu ý an toàn: nếu KHÔNG map được cột nào (không tìm thấy cột nào
-        trong file khớp mapping) thì KHÔNG xóa gì cả, để tránh lỡ tay xóa
-        mất dữ liệu khi chọn nhầm file/nhầm bảng.
-
-    Trả về một bộ 3 giá trị:
-      (số dòng đã thêm,
-       danh sách các cặp đã map - mỗi cặp là (tên_cột_DB, tên_cột_file),
-       danh sách tên cột file mong đợi nhưng KHÔNG tìm thấy trong file)
+    Bước CHUẨN BỊ của import (chưa đụng tới database): áp mapping lên DataFrame
+    đọc từ file, trả về bộ 3 giá trị:
+      (DataFrame đã đổi tên cột theo DB - hoặc None nếu không map được cột nào,
+       danh sách cặp đã map (tên_cột_DB, tên_cột_file),
+       danh sách tên cột file mong đợi nhưng KHÔNG tìm thấy)
+    Tách riêng để import nhiều file có thể chuẩn bị TẤT CẢ trước rồi mới ghi
+    vào DB trong một transaction duy nhất.
     """
     # Chọn mapping để dùng. Dạng: {tên_cột_DB: "tên cột trong file"}
     if custom_mapping is not None:
@@ -318,7 +303,7 @@ def import_dataframe(table_name, df, custom_mapping=None):
 
     # Nếu không map được cột nào thì không xóa, không import
     if len(data_for_insert) == 0:
-        return 0, [], missing_file_cols
+        return None, [], missing_file_cols
 
     # TRƯỜNG HỢP ĐẶC BIỆT (bảng sao kê): người dùng có thể map CÙNG MỘT cột
     # file (vd "Số tiền GD") cho cả Income lẫn Outcome, phân biệt bằng dấu +/-:
@@ -358,6 +343,40 @@ def import_dataframe(table_name, df, custom_mapping=None):
         lambda col: col.map(_cell_to_exact_text)
     )
 
+    return df_to_insert, mapped_pairs, missing_file_cols
+
+
+def import_dataframe(table_name, df, custom_mapping=None):
+    """
+    Đưa dữ liệu từ một DataFrame (đọc từ file CSV/Excel) vào bảng tương ứng,
+    DỰA THEO MAPPING.
+
+    Mapping được chọn như sau:
+      - Nếu có truyền custom_mapping (mapping do NGƯỜI DÙNG tự nhập, dùng cho
+        các bảng trong MANUAL_MAPPING_TABLES) thì dùng nó.
+      - Nếu không, dùng mapping CỐ ĐỊNH đã khai báo trong COLUMN_MAPPING.
+
+    Cách hoạt động:
+      - Với mỗi cột DB trong mapping, tìm cột tương ứng trong file (theo tên
+        cột trong file). Nếu file có cột đó thì lấy dữ liệu và đổi tên thành
+        tên cột DB.
+      - GHI ĐÈ TOÀN BỘ: trước khi thêm dữ liệu mới, bảng sẽ bị xóa sạch dữ
+        liệu cũ. Sau khi import, bảng chỉ còn đúng dữ liệu vừa import.
+      - Lưu ý an toàn: nếu KHÔNG map được cột nào (không tìm thấy cột nào
+        trong file khớp mapping) thì KHÔNG xóa gì cả, để tránh lỡ tay xóa
+        mất dữ liệu khi chọn nhầm file/nhầm bảng.
+
+    Trả về một bộ 3 giá trị:
+      (số dòng đã thêm,
+       danh sách các cặp đã map - mỗi cặp là (tên_cột_DB, tên_cột_file),
+       danh sách tên cột file mong đợi nhưng KHÔNG tìm thấy trong file)
+    """
+    df_to_insert, mapped_pairs, missing_file_cols = prepare_import(
+        table_name, df, custom_mapping
+    )
+    if df_to_insert is None:
+        return 0, [], missing_file_cols
+
     conn = get_connection()
     # Bước 1: xóa sạch dữ liệu cũ trong bảng (giữ nguyên cấu trúc bảng)
     conn.execute(f'DELETE FROM "{table_name}"')
@@ -367,6 +386,38 @@ def import_dataframe(table_name, df, custom_mapping=None):
     conn.close()
 
     return len(df_to_insert), mapped_pairs, missing_file_cols
+
+
+def replace_tables_atomically(prepared):
+    """
+    Ghi đè NHIỀU bảng trong MỘT transaction: hoặc tất cả thành công, hoặc có lỗi
+    thì rollback hết (mọi bảng giữ nguyên dữ liệu cũ).
+
+    prepared: dict {tên_bảng: DataFrame đã chuẩn bị bằng prepare_import}.
+    """
+    conn = get_connection()
+    try:
+        for table_name, df in prepared.items():
+            conn.execute(f'DELETE FROM "{table_name}"')
+            if len(df) == 0:
+                continue
+            columns = list(df.columns)
+            col_sql = ", ".join(f'"{c}"' for c in columns)
+            placeholders = ", ".join("?" for _ in columns)
+            rows = [
+                tuple(None if pd.isna(v) else v for v in row)
+                for row in df.itertuples(index=False, name=None)
+            ]
+            conn.executemany(
+                f'INSERT INTO "{table_name}" ({col_sql}) VALUES ({placeholders})',
+                rows,
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _cell_to_exact_text(value):
